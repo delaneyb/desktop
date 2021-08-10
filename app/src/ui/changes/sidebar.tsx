@@ -185,7 +185,7 @@ export class ChangesSidebar extends React.Component<IChangesSidebarProps, {}> {
     if (!file) {
       console.error(
         'unable to find working directory file to apply included change: ' +
-          path
+        path
       )
       return
     }
