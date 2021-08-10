@@ -9,7 +9,7 @@ import {
   WorkingDirectoryFileChange,
   AppFileStatusKind,
 } from '../../models/status'
-import { DiffSelectionType } from '../../models/diff'
+import { DiffLineType, DiffSelectionType, DiffType, IDiff } from '../../models/diff'
 import { CommitIdentity } from '../../models/commit-identity'
 import { ICommitMessage } from '../../models/commit-message'
 import { Repository } from '../../models/repository'
@@ -40,6 +40,12 @@ import { IStashEntry } from '../../models/stash-entry'
 import classNames from 'classnames'
 import { hasWritePermission } from '../../models/github-repository'
 import { hasConflictedFiles } from '../../lib/status'
+import { FancyTextBox } from '../lib/fancy-text-box'
+import { TextBox } from '../lib/text-box'
+import { getWorkingDirectoryDiff } from '../../lib/git'
+import { stat as fsStat } from 'fs'
+import { promisify } from 'util'
+const stat = promisify(fsStat)
 
 const RowHeight = 29
 const StashIcon: OcticonSymbol.OcticonSymbolType = {
@@ -110,7 +116,7 @@ interface IChangesListProps {
   readonly conflictState: ConflictState | null
   readonly rebaseConflictState: RebaseConflictState | null
   readonly selectedFileIDs: ReadonlyArray<string>
-  readonly onFileSelectionChanged: (rows: ReadonlyArray<number>) => void
+  readonly onFileSelectionChanged: (files: WorkingDirectoryFileChange[]) => void
   readonly onIncludeChanged: (path: string, include: boolean) => void
   readonly onSelectAll: (selectAll: boolean) => void
   readonly onCreateCommit: (context: ICommitContext) => Promise<boolean>
@@ -149,7 +155,7 @@ interface IChangesListProps {
    * Click event handler passed directly to the onRowClick prop of List, see
    * List Props for documentation.
    */
-  readonly onRowClick?: (row: number, source: ClickSource) => void
+  readonly onRowClick?: (file: WorkingDirectoryFileChange, source: ClickSource) => void
   readonly commitMessage: ICommitMessage
 
   /** The autocompletion providers available to the repository. */
@@ -196,48 +202,125 @@ interface IChangesListProps {
   readonly commitSpellcheckEnabled: boolean
 }
 
-interface IChangesState {
-  readonly selectedRows: ReadonlyArray<number>
+interface IFileChanges {
+  changes: IDiff,
+  mTime: number
 }
 
-function getSelectedRowsFromProps(
-  props: IChangesListProps
-): ReadonlyArray<number> {
-  const selectedFileIDs = props.selectedFileIDs
-  const selectedRows = []
-
-  for (const id of selectedFileIDs) {
-    const ix = props.workingDirectory.findFileIndexByID(id)
-    if (ix !== -1) {
-      selectedRows.push(ix)
-    }
-  }
-
-  return selectedRows
+interface IChangesState {
+  filterDiffText: string
+  filterPathText: string
+  /** Map from ids of files in the working directory to changed lines in the file for given last modification time */
+  fileChanges: { [id: string]: IFileChanges }
+  filteredFiles: ReadonlyArray<WorkingDirectoryFileChange>
+  // unstagedMatchingFilter: ReadonlyArray<WorkingDirectoryFileChange>
 }
 
 export class ChangesList extends React.Component<
   IChangesListProps,
   IChangesState
 > {
+  private listRef?: List
+  private filterDiffTextBoxRef?: TextBox
+
   public constructor(props: IChangesListProps) {
     super(props)
     this.state = {
-      selectedRows: getSelectedRowsFromProps(props),
+      filterDiffText: '',
+      filterPathText: '',
+      fileChanges: {},
+      // unstagedMatchingFilter: props.workingDirectory.files,
+      filteredFiles: props.workingDirectory.files
     }
+    this.updateFileChanges()
+  }
+
+  private getSelectedRows() {
+    return this.props.selectedFileIDs.map(fID => this.state.filteredFiles.findIndex(file => file.id === fID)).filter(r => r !== -1)
   }
 
   public componentWillReceiveProps(nextProps: IChangesListProps) {
     // No need to update state unless we haven't done it yet or the
     // selected file id list has changed.
     if (
-      !arrayEquals(nextProps.selectedFileIDs, this.props.selectedFileIDs) ||
       !arrayEquals(
         nextProps.workingDirectory.files,
         this.props.workingDirectory.files
       )
     ) {
-      this.setState({ selectedRows: getSelectedRowsFromProps(nextProps) })
+      // Immediately fix up any WorkingDirectoryFileChange references in the current state filteredFiles, otherwise UI will break
+      const pathsToWDFCs = nextProps.workingDirectory.files.reduce((o, f) => (o[f.path] = f, o), {} as { [path: string]: WorkingDirectoryFileChange })
+      this.setState({ ...this.state, filteredFiles: this.state.filteredFiles.map(f => pathsToWDFCs[f.path]).filter(Boolean) })
+
+      // Don't check and recompute file changes if only change is selected row ID(s) as this
+      // indicates the user has just changed the file selection not that content changed
+      if (arrayEquals(nextProps.selectedFileIDs, this.props.selectedFileIDs)) {
+        this.updateFileChanges()
+      }
+    }
+  }
+
+  private updateFileChangesTask?: Promise<any> = undefined
+  private async updateFileChanges() {
+    await (this.updateFileChangesTask = this.updateFileChangesTask || this.doUpdateFileChanges())
+    this.updateFileChangesTask = undefined
+    this.updateFilteredFiles()
+  }
+
+  private async doUpdateFileChanges() {
+    // Use modification times to determine which files to actually get updated changes on
+    // 9ms to get modification times of 46 files
+    const newFileChanges: IChangesState['fileChanges'] = {}
+    let anyChanges = false
+    await Promise.all(this.props.workingDirectory.files.map(async f => {
+      const fullPath = Path.join(this.props.repository.path, f.path)
+      const mTime = (await stat(fullPath)).mtimeMs
+      if (mTime === this.state.fileChanges[f.path]?.mTime) {
+        // No changes
+        newFileChanges[f.path] = this.state.fileChanges[f.path]
+      } else {
+        // Either file was not in the change list before or mod time has changed. Update the changes record for the file
+        newFileChanges[f.path] = {
+          mTime,
+          changes: await getWorkingDirectoryDiff(this.props.repository, f, false)
+        }
+        anyChanges = true
+      }
+    }))
+    if (anyChanges) {
+      this.setState({ ...this.state, fileChanges: newFileChanges })
+    }
+  }
+
+  private updateFilteredFiles(filterDiffText: string = this.state.filterDiffText, filterPathText: string = this.state.filterPathText) {
+    if (this.updateFileChangesTask) return  // Wait for the updateFileChangesTask to finish updating fileChanges, it will invoke this again once done
+    const filteredFiles = this.props.workingDirectory.files.filter(f => {
+      if (!f.path.includes(filterPathText)) return false
+      if (!filterDiffText) return true
+      const changes = this.state.fileChanges[f.path]?.changes
+      if (!changes) return console.warn(`Changes not found for ${f.path}`)
+      if (changes.kind === DiffType.Text || changes.kind === DiffType.LargeText) {
+        return changes.hunks.some(h => h.lines.some(l => l.type !== DiffLineType.Context && l.content.includes(filterDiffText)))
+      }
+    })
+
+    this.setState({
+      ...this.state,
+      filterDiffText,
+      filterPathText,
+      filteredFiles
+    })
+
+    // Make sure the current selection is valid
+    const validSelectedFileIds = this.props.selectedFileIDs.filter(fID => filteredFiles.find(f => f.id === fID))
+    if (!validSelectedFileIds.length) {
+      if (filteredFiles.length) {
+        this.props.onFileSelectionChanged([filteredFiles[0]])
+      } else {
+        this.props.onFileSelectionChanged([])
+      }
+    } else if (validSelectedFileIds.length !== this.props.selectedFileIDs.length) {
+      this.props.onFileSelectionChanged(validSelectedFileIds.map(id => this.props.workingDirectory.findFileWithID(id)!).filter(Boolean))
     }
   }
 
@@ -248,14 +331,13 @@ export class ChangesList extends React.Component<
 
   private renderRow = (row: number): JSX.Element => {
     const {
-      workingDirectory,
       rebaseConflictState,
       isCommitting,
       onIncludeChanged,
       availableWidth,
     } = this.props
 
-    const file = workingDirectory.files[row]
+    const file = this.state.filteredFiles[row]
     const selection = file.selection.getSelectionType()
 
     const includeAll =
@@ -735,6 +817,13 @@ export class ChangesList extends React.Component<
     _row: number,
     event: React.KeyboardEvent<HTMLDivElement>
   ) => {
+    if (event.key === "/") {
+      event.preventDefault()
+      this.filterDiffTextBoxRef?.focus()
+      this.filterDiffTextBoxRef?.selectAll()
+      return
+    }
+
     // The commit is already in-flight but this check prevents the
     // user from changing selection.
     if (
@@ -745,6 +834,18 @@ export class ChangesList extends React.Component<
     }
 
     return
+  }
+
+  private onFilterFieldKeyDown(evt: React.KeyboardEvent<HTMLInputElement>) {
+    if (this.state.filteredFiles.length) {
+      if (evt.key === "ArrowDown") {
+        this.props.onFileSelectionChanged([this.state.filteredFiles[0]])
+        this.listRef?.focus()
+      } else if (evt.key === "ArrowUp") {
+        this.props.onFileSelectionChanged([this.state.filteredFiles[this.state.filteredFiles.length - 1]])
+        this.listRef?.focus()
+      }
+    }
   }
 
   public render() {
@@ -782,22 +883,52 @@ export class ChangesList extends React.Component<
             disabled={disableAllCheckbox}
           />
         </div>
+        <div className="search-filter-form">
+          <div className="form-field-keyboard-hint">
+            <FancyTextBox
+              symbol={OcticonSymbol.search}
+              type="search"
+              placeholder="Search contents"
+              value={this.state.filterDiffText}
+              disabled={false}
+              onRef={ref => this.filterDiffTextBoxRef = ref}
+              onValueChanged={v => {
+                this.setState({ ...this.state, filterDiffText: v }, () => this.updateFilteredFiles())
+              }}
+              onKeyDown={k => this.onFilterFieldKeyDown(k)}
+            />
+            <div className="key-tile">/</div>
+          </div>
+          <FancyTextBox
+            symbol={OcticonSymbol.filter}
+            type="search"
+            placeholder="Filter file paths"
+            value={this.state.filterPathText}
+            disabled={false}
+            onRef={() => void 0}
+            onValueChanged={v => {
+              this.setState({ ...this.state, filterPathText: v }, () => this.updateFilteredFiles())
+            }}
+            onKeyDown={k => this.onFilterFieldKeyDown(k)}
+          />
+        </div>
         <List
           id="changes-list"
-          rowCount={this.props.workingDirectory.files.length}
+          rowCount={this.state.filteredFiles.length}
           rowHeight={RowHeight}
           rowRenderer={this.renderRow}
-          selectedRows={this.state.selectedRows}
+          selectedRows={this.getSelectedRows()}
           selectionMode="multi"
-          onSelectionChanged={this.props.onFileSelectionChanged}
+          onSelectionChanged={rows => this.props.onFileSelectionChanged(rows.map(r => this.state.filteredFiles[r]))}
           invalidationProps={{
             workingDirectory: this.props.workingDirectory,
             isCommitting: this.props.isCommitting,
           }}
-          onRowClick={this.props.onRowClick}
+          onRowClick={(row: number, source: ClickSource) => this.props.onRowClick?.(this.state.filteredFiles[row], source)}  // <List> actually calls this when you hit space on a row
           onScroll={this.onScroll}
           setScrollTop={this.props.changesListScrollTop}
           onRowKeyDown={this.onRowKeyDown}
+          ref={ref => this.listRef = ref!}
         />
         {this.renderStashedChanges()}
         {this.renderCommitMessageForm()}

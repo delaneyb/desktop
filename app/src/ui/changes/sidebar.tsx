@@ -171,8 +171,7 @@ export class ChangesSidebar extends React.Component<IChangesSidebarProps, {}> {
     )
   }
 
-  private onFileSelectionChanged = (rows: ReadonlyArray<number>) => {
-    const files = rows.map(i => this.props.changes.workingDirectory.files[i])
+  private onFileSelectionChanged = (files: WorkingDirectoryFileChange[]) => {
     this.props.dispatcher.selectWorkingDirectoryFiles(
       this.props.repository,
       files
@@ -249,10 +248,7 @@ export class ChangesSidebar extends React.Component<IChangesSidebarProps, {}> {
    * in order to match the behavior of clicking on an indeterminate
    * checkbox.
    */
-  private onToggleInclude(row: number) {
-    const workingDirectory = this.props.changes.workingDirectory
-    const file = workingDirectory.files[row]
-
+  private onToggleInclude(file: WorkingDirectoryFileChange) {
     if (!file) {
       console.error('keyboard selection toggle despite no file - what?')
       return
@@ -272,17 +268,13 @@ export class ChangesSidebar extends React.Component<IChangesSidebarProps, {}> {
    * Not the same thing as the element returned by the row renderer in ChangesList
    */
   private onChangedItemClick = (
-    rows: number | number[],
+    files: WorkingDirectoryFileChange,
     source: ClickSource
   ) => {
     // Toggle selection when user presses the spacebar or enter while focused
     // on a list item or on the list's container
     if (source.kind === 'keyboard') {
-      if (rows instanceof Array) {
-        rows.forEach(row => this.onToggleInclude(row))
-      } else {
-        this.onToggleInclude(rows)
-      }
+      this.onToggleInclude(files)
     }
   }
 

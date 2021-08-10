@@ -11,6 +11,40 @@
   flex-direction: column;
   min-height: 0;
 
+  .search-filter-form {
+    display: flex;
+    background: var(--box-alt-background-color);
+    flex-flow: row wrap;
+    padding: var(--spacing-half);
+    border-bottom: var(--base-border);
+    gap: var(--spacing-half);
+
+    >* {
+      flex: 1;
+    }
+  }
+
+  .form-field-keyboard-hint {
+    display: grid;
+    grid: auto / 1fr;
+    >* {
+      grid-area: 1 / 1;
+    }
+    >.key-tile {
+      justify-self: end;
+      align-self: stretch;
+      border: 1px solid var(--box-border-color);
+      border-radius: var(--border-radius);
+      padding: 0 var(--spacing);
+      margin: var(--spacing-half);
+      background: var(--box-alt-background-color);
+      display: flex;
+      align-items: center;
+      font-size: var(--font-size-sm);
+      font-family: var(--font-family-monospace);
+    }
+  }
+
   .stashed-changes-button {
     @include ellipsis;
     min-height: 29px;
