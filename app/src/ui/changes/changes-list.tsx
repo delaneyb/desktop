@@ -211,7 +211,7 @@ interface IChangesState {
   filterDiffText: string
   filterPathText: string
   /** Map from ids of files in the working directory to changed lines in the file for given last modification time */
-  fileChanges: { [id: string]: IFileChanges }
+  fileChanges: { [path: string]: IFileChanges }
   filteredFiles: ReadonlyArray<WorkingDirectoryFileChange>
   // unstagedMatchingFilter: ReadonlyArray<WorkingDirectoryFileChange>
 }
